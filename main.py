@@ -35,6 +35,7 @@ class ESP32Interface:
         self.state = RobotState()
         self.lock = threading.Lock()
         self.running = False
+        self.connected = False
         
     def connect(self):
         print(f"Connecting to ESP32 on {self.port} at {self.baudrate} baud...")
@@ -53,17 +54,26 @@ class ESP32Interface:
             print("\nTroubleshooting:")
             print("  1. Is ESP32 plugged in?")
             print(f"  2. Available ports: {glob.glob('/dev/tty*')}")
-            print("  3. Permission: sudo chmod 666 /dev/ttyUSB0")
+            print("  3. Try: sudo chmod 666 /dev/ttyUSB0")
             sys.exit(1)
         
-        # Flush any garbage data
+        # Flush any garbage data (ESP32 might have been sending before we connected)
+        print("Clearing serial buffers...")
         self.serial.reset_input_buffer()
         self.serial.reset_output_buffer()
         
-        # Wait for ESP32 ready signal with timeout
-        print("Waiting for ESP32 ready signal...")
+        # DTR reset to trigger ESP32 reboot (optional - might help)
+        self.serial.dtr = False
+        time.sleep(0.1)
+        self.serial.dtr = True
+        time.sleep(0.5)
+        
+        # Wait for valid telemetry data or ready signal
+        print("Waiting for ESP32...")
         start_time = time.time()
         timeout = 10  # 10 second timeout
+        telemetry_received = False
+        ready_received = False
         
         while time.time() - start_time < timeout:
             if self.serial.in_waiting:
@@ -79,28 +89,49 @@ class ESP32Interface:
                         except (UnicodeDecodeError, UnicodeError):
                             continue
                     
-                    if line:
-                        # Print everything during connection phase
-                        if "ESP32_READY" not in line:
-                            print(f"  ESP32: {line}")
+                    if not line:
+                        continue
                     
-                    if line and "ESP32_READY" in line:
+                    # Check for ready signal
+                    if "ESP32_READY" in line:
+                        ready_received = True
+                        print(f"  ESP32: {line}")
                         print("✅ Connected to ESP32 successfully!")
+                        self.connected = True
                         return True
+                    
+                    # Check for valid telemetry (alternative connection indicator)
+                    if line.startswith('o '):
+                        parts = line.split()
+                        if len(parts) >= 9:
+                            telemetry_received = True
+                            print(f"  Telemetry: {line}")
+                            print("✅ ESP32 is running and sending data!")
+                            print("   (Ready signal missed, but telemetry confirmed)")
+                            self.connected = True
+                            return True
+                    
+                    # Print other messages for debugging (first few only)
+                    if not telemetry_received and not ready_received:
+                        print(f"  ESP32: {line}")
                         
                 except Exception as e:
-                    print(f"  Error reading: {e}")
                     continue
             
-            time.sleep(0.1)
+            time.sleep(0.05)
         
-        print("❌ Timeout waiting for ESP32 ready signal!")
-        print("\nCheck:")
-        print("  1. Is the correct firmware uploaded?")
-        print("  2. Is ESP32 connected to correct USB port?")
-        print("  3. Try pressing the RST button on ESP32")
-        print("  4. Close Arduino IDE Serial Monitor first!")
-        sys.exit(1)
+        if telemetry_received:
+            print("✅ Connected (receiving telemetry)")
+            self.connected = True
+            return True
+        else:
+            print("❌ Could not connect to ESP32!")
+            print("\nCheck:")
+            print("  1. Is the firmware uploaded?")
+            print("  2. Is the ESP32 powered on?")
+            print("  3. Try pressing RST button on ESP32")
+            print("  4. Close Arduino Serial Monitor first!")
+            sys.exit(1)
                 
     def start_reading(self):
         """Start telemetry reading thread"""
@@ -126,7 +157,7 @@ class ESP32Interface:
                     
                     if line and line.startswith('o '):
                         parts = line.split()
-                        if len(parts) >= 9:  # Make sure we have all fields
+                        if len(parts) >= 9:
                             with self.lock:
                                 try:
                                     self.state.x = float(parts[1])
@@ -139,7 +170,7 @@ class ESP32Interface:
                                     self.state.right_vel = float(parts[8])
                                     self.state.timestamp = time.time()
                                 except ValueError:
-                                    pass  # Skip malformed numbers
+                                    pass
                                     
                 except Exception:
                     pass  # Ignore occasional read errors
@@ -150,7 +181,6 @@ class ESP32Interface:
         if self.serial:
             try:
                 self.serial.write(cmd.encode())
-                self.serial.flush()  # Ensure it's sent immediately
             except Exception as e:
                 print(f"Send error: {e}")
             
@@ -159,7 +189,6 @@ class ESP32Interface:
         if self.serial:
             try:
                 self.serial.write(b"s\n")
-                self.serial.flush()
             except Exception as e:
                 print(f"Emergency stop error: {e}")
             
@@ -220,11 +249,9 @@ class NavigationController:
         dt = time.time() - self.last_time
         self.last_time = time.time()
         
-        # Prevent division by zero
         if dt <= 0.0:
             dt = 0.02
         
-        # Calculate distance and angle to goal
         dx = goal_x - current.x
         dy = goal_y - current.y
         distance = math.sqrt(dx**2 + dy**2)
@@ -233,15 +260,12 @@ class NavigationController:
             self.heading_integral = 0.0
             return 0.0, 0.0
         
-        # Target heading
         target_heading = math.atan2(dy, dx)
         
-        # Heading error (normalized to [-PI, PI])
         heading_error = target_heading - current.theta
         heading_error = math.atan2(math.sin(heading_error), 
                                    math.cos(heading_error))
         
-        # Heading PID controller
         self.heading_integral += heading_error * dt
         self.heading_integral = max(-0.5, min(0.5, self.heading_integral))
         
@@ -252,16 +276,13 @@ class NavigationController:
                      self.ki_h * self.heading_integral + 
                      self.kd_h * heading_derivative)
         
-        # Limit angular velocity
         omega_cmd = max(-self.max_omega, min(self.max_omega, omega_cmd))
         
-        # Velocity profile - trapezoidal
         v_cmd = min(self.max_v, 0.3 * math.sqrt(distance))
         
-        # Reduce speed when heading error is large
-        if abs(heading_error) > 0.5:      # >30 degrees off
+        if abs(heading_error) > 0.5:
             v_cmd *= 0.2
-        elif abs(heading_error) > 0.3:    # >17 degrees off
+        elif abs(heading_error) > 0.3:
             v_cmd *= 0.5
             
         return v_cmd, omega_cmd
@@ -281,28 +302,22 @@ class DeliveryRobot:
         start_time = time.time()
         
         while time.time() - start_time < timeout:
-            # Get latest state
             self.state = self.esp32.get_state()
             
-            # Check if arrived
             dist = math.sqrt((x - self.state.x)**2 + (y - self.state.y)**2)
             if dist < 0.1:
                 print(f"\n✅ Arrived! Final distance: {dist:.3f}m")
                 return True
             
-            # Compute control
             v, omega = self.navigator.compute(self.state, x, y)
-            
-            # Send to ESP32
             self.esp32.send_velocity(v, omega)
             
-            # Print status
             heading_err = math.degrees(self.navigator.prev_heading_error)
             print(f"\r  Dist: {dist:.2f}m | Heading err: {heading_err:5.1f}° | "
                   f"v: {v:4.2f} | ω: {omega:5.2f} | "
                   f"X: {self.state.x:5.2f} Y: {self.state.y:5.2f}  ", end="")
             
-            time.sleep(0.02)  # 50Hz
+            time.sleep(0.02)
             
         print("\n❌ Timeout - failed to reach goal")
         return False
@@ -321,8 +336,7 @@ class DeliveryRobot:
                 print("Mission aborted!")
                 return False
             
-            # Simulate delivery
-            if i < len(waypoints) - 1:  # Don't wait at final stop
+            if i < len(waypoints) - 1:
                 print(f"  📦 Delivering package...")
                 time.sleep(2)
                 
@@ -344,11 +358,9 @@ if __name__ == "__main__":
     
     if not possible_ports:
         print("❌ No USB serial devices found!")
-        print("Check if ESP32 is connected:")
-        print("  $ ls /dev/tty*")
+        print("Check if ESP32 is connected: ls /dev/tty*")
         sys.exit(1)
     
-    # Use first available port
     port = possible_ports[0]
     print(f"Found ESP32 on: {port}")
     
@@ -357,17 +369,16 @@ if __name__ == "__main__":
     esp32.connect()
     esp32.start_reading()
     
-    # Create robot controller
     robot = DeliveryRobot(esp32)
     
     try:
-        # Give telemetry time to start flowing
-        print("\nWaiting for telemetry...")
-        time.sleep(0.5)
+        # Wait for telemetry to stabilize
+        print("\nWaiting for telemetry to stabilize...")
+        time.sleep(1.0)
         
         # Quick motor test
         print("\n🔧 Motor test - moving forward slowly for 1 second...")
-        esp32.send_velocity(0.15, 0.0)  # 0.15 m/s straight
+        esp32.send_velocity(0.15, 0.0)
         time.sleep(1.0)
         esp32.send_velocity(0.0, 0.0)
         print("Motor test complete")
