@@ -374,7 +374,7 @@ if __name__ == "__main__":
     try:
         # Wait for telemetry to stabilize
         print("\nWaiting for telemetry to stabilize...")
-        time.sleep(1.0)
+        time.sleep(10.0)
         
         # Quick motor test
         print("\n🔧 Motor test - moving forward slowly for 1 second...")
