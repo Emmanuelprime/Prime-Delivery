@@ -21,10 +21,10 @@
 #define LEFT_CH  1
 
 // ============================================
-// ROBOT PARAMETERS
+// ROBOT PARAMETERS (CALIBRATE THESE!)
 // ============================================
-const float WHEEL_RADIUS = 0.17;
-const float WHEEL_BASE   = 0.521;
+const float WHEEL_RADIUS = 0.17;      // meters
+const float WHEEL_BASE   = 0.521;     // meters
 const float PULSES_PER_REV = 90.0;
 
 // ============================================
@@ -56,17 +56,16 @@ volatile long left_pulses = 0;
 
 // Odometry state
 float x = 0.0, y = 0.0, theta = 0.0;
+float left_vel = 0.0;   // Current measured left wheel velocity (m/s)
+float right_vel = 0.0;  // Current measured right wheel velocity (m/s)
 
 // Velocity commands (from Python)
-float v_cmd = 0.0;    // m/s
-float omega_cmd = 0.0; // rad/s
+float v_cmd = 0.0;       // m/s
+float omega_cmd = 0.0;   // rad/s
 
 // Current velocities (with ramping)
 float v_current = 0.0;
 float omega_current = 0.0;
-
-float left_vel = 0.0;   // Current measured left wheel velocity (m/s)
-float right_vel = 0.0;  // Current measured right wheel velocity (m/s
 
 // PID state per wheel
 float left_integral = 0.0, right_integral = 0.0;
@@ -117,10 +116,10 @@ void setMotorPWM(const char* motor, int pwm) {
         }
     } else if (strcmp(motor, "right") == 0) {
         if (pwm >= 0) {
-            digitalWrite(RIGHT_DIR, LOW);  // Forward (mirrored)
+            digitalWrite(RIGHT_DIR, LOW);  // Forward (mirrored mounting)
             ledcWrite(RIGHT_CH, constrain(pwm, MIN_PWM, MAX_PWM));
         } else {
-            digitalWrite(RIGHT_DIR, HIGH); // Reverse (mirrored)
+            digitalWrite(RIGHT_DIR, HIGH); // Reverse (mirrored mounting)
             ledcWrite(RIGHT_CH, constrain(-pwm, MIN_PWM, MAX_PWM));
         }
     }
@@ -146,7 +145,10 @@ int wheelPID(const char* motor, float target_vel, float measured_vel, float dt) 
     *integral += error * dt;
     *integral = constrain(*integral, -INTEGRAL_MAX, INTEGRAL_MAX);
     
-    float derivative = (error - *prev_error) / dt;
+    float derivative = 0.0;
+    if (dt > 0.001) {
+        derivative = (error - *prev_error) / dt;
+    }
     *prev_error = error;
     
     float output = Kp * error + Ki * (*integral) + Kd * derivative;
@@ -184,7 +186,7 @@ void parseCommand(String cmd) {
         Serial.println("EMERGENCY_STOP");
     }
     else if (cmd.startsWith("kp ")) {
-        // Tune PID gains remotely!
+        // Tune PID gains remotely
         Kp = cmd.substring(3).toFloat();
         Serial.print("Kp set to: "); Serial.println(Kp);
     }
@@ -239,17 +241,15 @@ void sendTelemetry() {
     Serial.print(v_current, 4); Serial.print(" ");
     Serial.print(omega_current, 4); Serial.print(" ");
     Serial.print(gyro_z, 4); Serial.print(" ");
-    Serial.print(left_vel, 4); Serial.print(" ");    // Now accessible
-    Serial.println(right_vel, 4);                     // Now accessible
+    Serial.print(left_vel, 4); Serial.print(" ");
+    Serial.println(right_vel, 4);
 }
 
 // ============================================
 // SETUP
 // ============================================
 void setup() {
-    Serial.begin(460800);  // Fast baudrate
-    // Or use Serial2 for dedicated communication
-    // Serial2.begin(460800, SERIAL_8N1, 16, 17);
+    Serial.begin(115200);  // Match Python baud rate
     
     Wire.begin();
     Wire.setClock(400000);
@@ -274,6 +274,7 @@ void setup() {
     
     delay(1000);
     Serial.println("ESP32_READY");
+    Serial.flush();  // Force send immediately
 }
 
 // ============================================
@@ -281,7 +282,6 @@ void setup() {
 // ============================================
 void loop() {
     unsigned long now = millis();
-    float dt = (now - last_control_time) / 1000.0;
     
     // ==========================================
     // 1. CHECK FOR COMMAND TIMEOUT (SAFETY)
@@ -294,7 +294,7 @@ void loop() {
     // ==========================================
     // 2. READ COMMANDS FROM PYTHON
     // ==========================================
-    if (Serial.available()) {
+    while (Serial.available()) {
         String cmd = Serial.readStringUntil('\n');
         parseCommand(cmd);
     }
@@ -303,8 +303,11 @@ void loop() {
     // 3. RUN CONTROL LOOP (50Hz)
     // ==========================================
     if (now - last_control_time >= CONTROL_DT_MS) {
-        dt = (now - last_control_time) / 1000.0;
+        float dt = (now - last_control_time) / 1000.0;
         last_control_time = now;
+        
+        // Prevent huge dt on first run or after lag
+        if (dt > 0.1) dt = 0.02;
         
         // Read encoders
         noInterrupts();
@@ -314,9 +317,11 @@ void loop() {
         left_pulses = 0;
         interrupts();
         
-        // Calculate wheel velocities
-        float right_vel = (2 * PI * WHEEL_RADIUS * rc) / (PULSES_PER_REV * dt);
-        float left_vel  = (2 * PI * WHEEL_RADIUS * lc) / (PULSES_PER_REV * dt);
+        // Calculate wheel velocities (update globals)
+        if (dt > 0) {
+            right_vel = (2 * PI * WHEEL_RADIUS * rc) / (PULSES_PER_REV * dt);
+            left_vel  = (2 * PI * WHEEL_RADIUS * lc) / (PULSES_PER_REV * dt);
+        }
         
         // Ramp commanded velocities
         rampVelocity(dt);
