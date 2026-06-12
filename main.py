@@ -379,20 +379,20 @@ if __name__ == "__main__":
         # Quick motor test
         print("\n🔧 Motor test - moving forward slowly for 1 second...")
         esp32.send_velocity(0.15, 0.0)
-        time.sleep(1.0)
+        time.sleep(5.0)
         esp32.send_velocity(0.0, 0.0)
         print("Motor test complete")
         
-        time.sleep(0.5)
+        # time.sleep(0.5)
         
-        # Execute delivery mission
-        waypoints = [
-            (1.0, 0.0),   # First delivery - 1m forward
-            (1.0, 1.0),   # Second delivery - 1m left
-            (0.0, 0.0),   # Return home
-        ]
+        # # Execute delivery mission
+        # waypoints = [
+        #     (1.0, 0.0),   # First delivery - 1m forward
+        #     (1.0, 1.0),   # Second delivery - 1m left
+        #     (0.0, 0.0),   # Return home
+        # ]
         
-        robot.deliver(waypoints)
+        # robot.deliver(waypoints)
         
     except KeyboardInterrupt:
         print("\n\n⏹️  Interrupted by user!")
