@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Simple Motor Test - No navigation, just drive motors
+Simple Motor Test - Just drive motors
 """
 
 import serial
@@ -8,147 +8,252 @@ import time
 import sys
 import glob
 
-class SimpleMotorTest:
-    def __init__(self, port='/dev/ttyUSB0', baudrate=115200):
-        self.port = port
-        self.baudrate = baudrate
-        self.serial = None
-        
-    def connect(self):
-        print(f"Connecting to ESP32 on {self.port}...")
-        
-        self.serial = serial.Serial(
-            port=self.port,
-            baudrate=self.baudrate,
-            timeout=1.0
-        )
-        
-        # Wait for ESP32 ready
-        print("Waiting for ESP32 to boot...")
-        start_time = time.time()
-        while time.time() - start_time < 15:
-            if self.serial.in_waiting:
-                line = self.serial.readline().decode('latin-1').strip()
-                if line:
-                    print(f"  ESP32: {line}")
-                if "ESP32_READY" in line:
-                    print("✅ Connected!\n")
-                    return True
+def connect_esp32(port, baudrate=115200):
+    """Connect to ESP32 with robust handling"""
+    print(f"Opening {port} at {baudrate} baud...")
+    
+    ser = serial.Serial(port, baudrate, timeout=1.0)
+    
+    # Flush everything
+    ser.reset_input_buffer()
+    ser.reset_output_buffer()
+    
+    print("Connected! Sending test commands...")
+    print("(Press Ctrl+C to stop)\n")
+    
+    return ser
+
+def send_command(ser, cmd):
+    """Send a command string"""
+    full_cmd = cmd + "\n"
+    ser.write(full_cmd.encode())
+    ser.flush()
+
+def read_telemetry(ser, duration=0.5):
+    """Read and display telemetry for duration seconds"""
+    start = time.time()
+    while time.time() - start < duration:
+        if ser.in_waiting:
+            try:
+                line = ser.readline().decode('latin-1').strip()
+                if line.startswith('o ') or line.startswith('DBG:') or line.startswith('CMD:') or line.startswith('SET:'):
+                    print(f"  {line}")
+            except:
+                pass
+        time.sleep(0.01)
+
+def motor_test_sequence(ser):
+    """Run a series of motor tests"""
+    
+    print("=" * 60)
+    print("MOTOR TEST SEQUENCE")
+    print("=" * 60)
+    
+    # Test 1: Very slow forward
+    print("\n[TEST 1] Slow forward - 0.10 m/s for 3 seconds")
+    print("Robot should move FORWARD slowly")
+    send_command(ser, "v 0.10 0.0")
+    
+    for i in range(6):
+        time.sleep(0.5)
+        if ser.in_waiting:
+            line = ser.readline().decode('latin-1').strip()
+            if 'DBG:' in line or 'SET:' in line:
+                print(f"  {line}")
+        print(f"  ...{i+1}/6", end='\r')
+    
+    # Stop
+    print("\n[STOP] Stopping for 1 second")
+    send_command(ser, "v 0.0 0.0")
+    time.sleep(1.0)
+    
+    # Test 2: Medium forward
+    print("\n[TEST 2] Medium forward - 0.20 m/s for 3 seconds")
+    print("Robot should move FORWARD faster")
+    send_command(ser, "v 0.20 0.0")
+    
+    for i in range(6):
+        time.sleep(0.5)
+        if ser.in_waiting:
+            line = ser.readline().decode('latin-1').strip()
+            if 'DBG:' in line or 'SET:' in line:
+                print(f"  {line}")
+        print(f"  ...{i+1}/6", end='\r')
+    
+    # Stop
+    print("\n[STOP] Stopping for 1 second")
+    send_command(ser, "v 0.0 0.0")
+    time.sleep(1.0)
+    
+    # Test 3: Turn left
+    print("\n[TEST 3] Turn left - ω=0.5 rad/s for 2 seconds")
+    print("Robot should TURN LEFT (counter-clockwise)")
+    send_command(ser, "v 0.0 0.5")
+    
+    for i in range(4):
+        time.sleep(0.5)
+        if ser.in_waiting:
+            line = ser.readline().decode('latin-1').strip()
+            if 'DBG:' in line or 'SET:' in line:
+                print(f"  {line}")
+        print(f"  ...{i+1}/4", end='\r')
+    
+    # Stop
+    print("\n[STOP] Stopping for 1 second")
+    send_command(ser, "v 0.0 0.0")
+    time.sleep(1.0)
+    
+    # Test 4: Turn right
+    print("\n[TEST 4] Turn right - ω=-0.5 rad/s for 2 seconds")
+    print("Robot should TURN RIGHT (clockwise)")
+    send_command(ser, "v 0.0 -0.5")
+    
+    for i in range(4):
+        time.sleep(0.5)
+        if ser.in_waiting:
+            line = ser.readline().decode('latin-1').strip()
+            if 'DBG:' in line or 'SET:' in line:
+                print(f"  {line}")
+        print(f"  ...{i+1}/4", end='\r')
+    
+    # Stop
+    print("\n[STOP] Test complete - stopping")
+    send_command(ser, "s")
+    
+    print("\n" + "=" * 60)
+    print("ALL TESTS COMPLETE")
+    print("If robot didn't move, check:")
+    print("  1. Motor battery connected?")
+    print("  2. Motor driver enabled?")
+    print("  3. Check debug output for 'PWM(L=X R=X)' - should be non-zero")
+    print("=" * 60)
+
+def interactive_mode(ser):
+    """Interactive control mode"""
+    print("\n" + "=" * 60)
+    print("INTERACTIVE MODE")
+    print("Commands:")
+    print("  f = forward (0.15 m/s)")
+    print("  b = backward (-0.15 m/s)")
+    print("  l = turn left (0.5 rad/s)")
+    print("  r = turn right (-0.5 rad/s)")
+    print("  s = stop")
+    print("  1-5 = set speed 0.1 to 0.5 m/s forward")
+    print("  q = quit")
+    print("=" * 60)
+    
+    while True:
+        try:
+            cmd = input("\nCommand: ").strip().lower()
+            
+            if cmd == 'q':
+                break
+            elif cmd == 'f':
+                send_command(ser, "v 0.15 0.0")
+                print("Forward 0.15 m/s")
+            elif cmd == 'b':
+                send_command(ser, "v -0.15 0.0")
+                print("Backward 0.15 m/s")
+            elif cmd == 'l':
+                send_command(ser, "v 0.0 0.5")
+                print("Turn left")
+            elif cmd == 'r':
+                send_command(ser, "v 0.0 -0.5")
+                print("Turn right")
+            elif cmd == 's':
+                send_command(ser, "v 0.0 0.0")
+                print("Stop")
+            elif cmd in ['1', '2', '3', '4', '5']:
+                speed = int(cmd) * 0.1
+                send_command(ser, f"v {speed:.1f} 0.0")
+                print(f"Forward {speed:.1f} m/s")
+            else:
+                print("Unknown command!")
+                
+            # Read any response
             time.sleep(0.1)
-        
-        print("❌ Timeout!")
-        return False
-    
-    def send_velocity(self, v, omega):
-        """Send velocity command"""
-        cmd = f"v {v:.3f} {omega:.3f}\n"
-        print(f"Sending: {cmd.strip()}")
-        self.serial.write(cmd.encode())
-        self.serial.flush()
-    
-    def stop(self):
-        """Stop motors"""
-        print("Stopping motors...")
-        self.serial.write(b"s\n")
-        self.serial.flush()
-        time.sleep(0.1)
-        self.serial.close()
-    
-    def read_telemetry(self, duration=1.0):
-        """Read and print telemetry for given duration"""
-        print("Reading telemetry...")
-        start = time.time()
-        while time.time() - start < duration:
-            if self.serial.in_waiting:
+            while ser.in_waiting:
                 try:
-                    line = self.serial.readline().decode('latin-1').strip()
-                    if line.startswith('o '):
-                        parts = line.split()
-                        if len(parts) >= 9:
-                            print(f"  x={float(parts[1]):.3f}, y={float(parts[2]):.3f}, "
-                                  f"v={float(parts[4]):.3f}, ω={float(parts[5]):.3f}, "
-                                  f"L_vel={float(parts[7]):.3f}, R_vel={float(parts[8]):.3f}")
+                    line = ser.readline().decode('latin-1').strip()
+                    if line and ('DBG:' in line or 'CMD:' in line or 'SET:' in line):
+                        print(f"  {line}")
                 except:
                     pass
-            time.sleep(0.01)
+                    
+        except KeyboardInterrupt:
+            break
+        except EOFError:
+            break
+    
+    send_command(ser, "s")
+    print("Exiting interactive mode")
 
 if __name__ == "__main__":
-    print("=" * 50)
-    print("SIMPLE MOTOR TEST")
-    print("=" * 50)
+    print("=" * 60)
+    print("ESP32 MOTOR TEST")
+    print("=" * 60)
     
     # Find port
     ports = glob.glob('/dev/ttyUSB*') + glob.glob('/dev/ttyACM*')
     if not ports:
-        print("No ESP32 found!")
+        print("❌ No ESP32 found!")
+        print("Check: ls /dev/tty*")
         sys.exit(1)
     
     port = ports[0]
-    print(f"Using port: {port}\n")
+    print(f"Found device: {port}\n")
     
     # Connect
-    tester = SimpleMotorTest(port)
-    if not tester.connect():
-        sys.exit(1)
+    ser = connect_esp32(port, 115200)
     
     try:
-        # Test 1: Very slow forward
-        print("\n" + "=" * 50)
-        print("TEST 1: Slow forward (0.10 m/s for 3 seconds)")
-        print("=" * 50)
-        print("Robot should move FORWARD slowly...")
-        tester.send_velocity(0.10, 0.0)
-        tester.read_telemetry(3.0)
+        # Wait a moment for ESP32 to be ready
+        print("Waiting 3 seconds for ESP32 initialization...")
+        time.sleep(3.0)
         
-        # Stop
-        print("\nStopping...")
-        tester.send_velocity(0.0, 0.0)
-        time.sleep(1.0)
+        # Flush startup messages
+        ser.reset_input_buffer()
         
-        # Test 2: Medium forward
-        # print("\n" + "=" * 50)
-        # print("TEST 2: Medium forward (0.20 m/s for 3 seconds)")
-        # print("=" * 50)
-        # print("Robot should move FORWARD at medium speed...")
-        # tester.send_velocity(0.20, 0.0)
-        # tester.read_telemetry(3.0)
+        # Send a test command and check response
+        print("Sending test command...")
+        send_command(ser, "debug")  # Toggle debug to see response
+        time.sleep(0.5)
         
-        # # Stop
-        # print("\nStopping...")
-        # tester.send_velocity(0.0, 0.0)
-        # time.sleep(1.0)
+        # Read response
+        print("ESP32 Response:")
+        while ser.in_waiting:
+            line = ser.readline().decode('latin-1').strip()
+            if line:
+                print(f"  {line}")
         
-        # # Test 3: Turn left
-        # print("\n" + "=" * 50)
-        # print("TEST 3: Turn left (ω = 0.5 rad/s for 2 seconds)")
-        # print("=" * 50)
-        # print("Robot should TURN LEFT...")
-        # tester.send_velocity(0.0, 0.5)
-        # tester.read_telemetry(2.0)
+        # Ask user what they want
+        print("\nOptions:")
+        print("  1. Automatic test sequence")
+        print("  2. Interactive control")
+        print("  3. Single command test")
         
-        # # Stop
-        # print("\nStopping...")
-        # tester.send_velocity(0.0, 0.0)
-        # time.sleep(1.0)
+        choice = input("\nChoice (1/2/3): ").strip()
         
-        # # Test 4: Turn right
-        # print("\n" + "=" * 50)
-        # print("TEST 4: Turn right (ω = -0.5 rad/s for 2 seconds)")
-        # print("=" * 50)
-        # print("Robot should TURN RIGHT...")
-        # tester.send_velocity(0.0, -0.5)
-        # tester.read_telemetry(2.0)
-        
-        # # Stop
-        # print("\nStopping...")
-        # tester.send_velocity(0.0, 0.0)
-        
-        print("\n" + "=" * 50)
-        print("ALL TESTS COMPLETE")
-        print("=" * 50)
+        if choice == '1':
+            motor_test_sequence(ser)
+        elif choice == '2':
+            interactive_mode(ser)
+        elif choice == '3':
+            print("\nEnter velocity command (e.g., 'v 0.15 0.0'):")
+            cmd = input("> ").strip()
+            send_command(ser, cmd)
+            time.sleep(2.0)
+            send_command(ser, "s")
+            print("Command sent, then stopped")
+        else:
+            print("Invalid choice, running test sequence...")
+            motor_test_sequence(ser)
         
     except KeyboardInterrupt:
         print("\n\nInterrupted!")
     finally:
-        tester.stop()
+        print("\nStopping motors and closing connection...")
+        send_command(ser, "s")
+        time.sleep(0.2)
+        ser.close()
         print("Done.")
