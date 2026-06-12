@@ -10,7 +10,7 @@ import time
 import threading
 from dataclasses import dataclass
 from typing import Optional
-import numpy as np
+# import numpy as np
 
 @dataclass
 class RobotState:
